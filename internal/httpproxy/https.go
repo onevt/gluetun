@@ -21,7 +21,7 @@ func (h *handler) handleHTTPS(responseWriter http.ResponseWriter, request *http.
 		http.Error(responseWriter, "Hijacking not supported", http.StatusInternalServerError)
 		return
 	}
-	clientConnection, _, err := hijacker.Hijack()
+	clientConnection, clientBuffer, err := hijacker.Hijack()
 	if err != nil {
 		h.logger.Warn(err.Error())
 		http.Error(responseWriter, err.Error(), http.StatusServiceUnavailable)
@@ -29,6 +29,20 @@ func (h *handler) handleHTTPS(responseWriter http.ResponseWriter, request *http.
 			h.logger.Error("closing destination connection: " + err.Error())
 		}
 		return
+	}
+
+	// Hijack flushes the 200 response, and the HTTP server may already have read
+	// bytes the client sent after it, such as the start of a TLS client hello.
+	// These are only in the hijack buffer and must be forwarded first.
+	if buffered := clientBuffer.Reader.Buffered(); buffered > 0 {
+		data, _ := clientBuffer.Reader.Peek(buffered)
+		_, err = destinationConn.Write(data)
+		if err != nil {
+			h.logger.Warn("writing buffered client data to destination: " + err.Error())
+			_ = clientConnection.Close()
+			_ = destinationConn.Close()
+			return
+		}
 	}
 
 	if h.verbose {
